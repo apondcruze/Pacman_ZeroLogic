@@ -2,18 +2,23 @@
 #include <iostream>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
 #include <ctime>
 #include <cctype>
 using namespace std;
 
 const int W = 800;
-const int H = 700;
+const int H = 740;
 const int ROWS = 19;
 const int COLS = 19;
 const float CELL = 35.0f;
+const float MAZE_H = ROWS * CELL;
+const float HUD_Y = MAZE_H + 35.0f;
 
-enum State { MENU, PLAYING };
+enum State { MENU, PLAYING, PAUSED, GAME_OVER, GAME_WON };
 State state = MENU;
+bool gameInProgress = false;
+int menuSel = 0;
 
 const int UP=0, DOWN=1, LEFT=2, RIGHT=3;
 
@@ -64,6 +69,17 @@ float mouthAnim=20;
 bool opening=true;
 
 Ghost ghosts[4];
+const float BASE_GHOST_SPEED = 2.6f;
+
+bool dots[ROWS][COLS];
+int dotsRemaining = 0;
+
+int score = 0;
+int lives = 3;
+int startTimeMs = 0;
+int pauseAccumMs = 0;
+int pauseStartMs = 0;
+int elapsedSec = 0;
 
 bool canMove(float x,float y){
     const float r=11;
@@ -74,10 +90,9 @@ bool canMove(float x,float y){
              maze[ROWS-1-b][l]||maze[ROWS-1-b][rgt]);
 }
 
-// Improved Ghost AI: Roam widely when far, Chase when close
 int chooseGhostDir(Ghost& g, float pacX, float pacY) {
     float distToPac = hypot(g.x - pacX, g.y - pacY);
-    bool shouldChase = (distToPac < 130.0f);   // Chase range
+    bool shouldChase = (distToPac < 130.0f);
 
     int possible[4] = {-1,-1,-1,-1};
     int count = 0;
@@ -85,22 +100,17 @@ int chooseGhostDir(Ghost& g, float pacX, float pacY) {
 
     for(int d=0; d<4; d++) {
         if(d == (g.dir + 2) % 4) continue;
-
         float dx=0, dy=0;
         if(d==LEFT)  dx = -g.speed;
         if(d==RIGHT) dx =  g.speed;
         if(d==UP)    dy =  g.speed;
         if(d==DOWN)  dy = -g.speed;
-
-        if(canMove(px + dx, py + dy)) {
-            possible[count++] = d;
-        }
+        if(canMove(px + dx, py + dy)) possible[count++] = d;
     }
 
     if(count == 0) return g.dir;
 
     if(shouldChase) {
-        // Chase Pacman
         int best = possible[0];
         float bestDist = 1e9;
         for(int i=0; i<count; i++) {
@@ -110,24 +120,68 @@ int chooseGhostDir(Ghost& g, float pacX, float pacY) {
             if(d==RIGHT) dx =  g.speed*3.0f;
             if(d==UP)    dy =  g.speed*3.0f;
             if(d==DOWN)  dy = -g.speed*3.0f;
-
-            float newx = px + dx;
-            float newy = py + dy;
+            float newx = px + dx, newy = py + dy;
             float dist = (newx - pacX)*(newx - pacX) + (newy - pacY)*(newy - pacY);
-            if(dist < bestDist) {
-                bestDist = dist;
-                best = d;
-            }
+            if(dist < bestDist) { bestDist = dist; best = d; }
         }
         return best;
+    } else {
+        for(int i=0; i<count; i++)
+            if(possible[i] == g.dir) return g.dir;
+        return possible[rand() % count];
     }
-    else {
-        // Roam: Prefer continuing in current direction, otherwise random
-        for(int i=0; i<count; i++) {
-            if(possible[i] == g.dir) return g.dir;   // Keep going straight if possible
+}
+
+void placePacmanSpawn(){
+    pacman = Entity(1.5f*CELL, (ROWS-1.5f)*CELL, RIGHT, 3.0f);
+}
+
+void placeGhostSpawns(){
+    ghosts[0] = Ghost(3.5f*CELL,  15.5f*CELL, 1.0f, 0.0f, 0.0f);
+    ghosts[1] = Ghost(15.5f*CELL, 15.5f*CELL, 1.0f, 0.6f, 0.6f);
+    ghosts[2] = Ghost(5.5f*CELL,   5.5f*CELL, 0.0f, 1.0f, 1.0f);
+    ghosts[3] = Ghost(13.5f*CELL,  8.5f*CELL, 1.0f, 0.6f, 0.0f);
+}
+
+bool isSpawnCell(int row, int col){
+    // Pacman spawn cell
+    if(row == 1 && col == 1) return true;
+    // Ghost spawn cells
+    if(row == 3 && col == 3) return true;
+    if(row == 3 && col == 15) return true;
+    if(row == 13 && col == 5) return true;
+    if(row == 10 && col == 13) return true;
+    return false;
+}
+
+void resetDots(){
+    dotsRemaining = 0;
+    for(int i=0;i<ROWS;i++){
+        for(int j=0;j<COLS;j++){
+            if(maze[i][j]==0 && !isSpawnCell(i,j)){
+                dots[i][j] = true;
+                dotsRemaining++;
+            } else {
+                dots[i][j] = false;
+            }
         }
-        return possible[rand() % count];   // Otherwise random valid direction
     }
+}
+
+void resetGame(){
+    resetDots();
+    score = 0;
+    lives = 3;
+    placePacmanSpawn();
+    placeGhostSpawns();
+    startTimeMs = glutGet(GLUT_ELAPSED_TIME);
+    pauseAccumMs = 0;
+    elapsedSec = 0;
+}
+
+void respawnAfterDeath(){
+    placePacmanSpawn();
+    placeGhostSpawns();
 }
 
 void drawMaze(){
@@ -155,9 +209,27 @@ void drawMaze(){
     }
 }
 
+void drawDots(){
+    glColor3f(1.0f, 0.85f, 0.5f);
+    for(int i=0;i<ROWS;i++){
+        for(int j=0;j<COLS;j++){
+            if(!dots[i][j]) continue;
+            float cx = (j+0.5f)*CELL;
+            float cy = (ROWS-1-i+0.5f)*CELL;
+            glBegin(GL_TRIANGLE_FAN);
+            glVertex2f(cx, cy);
+            for(int a=0;a<=360;a+=30){
+                float r = a*3.1416f/180;
+                glVertex2f(cx+3.0f*cos(r), cy+3.0f*sin(r));
+            }
+            glEnd();
+        }
+    }
+}
+
 void drawPacman(){
     glColor3f(1,1,0);
-    float s,e;
+    float s=0,e=0;
     switch(pacman.dir){
         case RIGHT: s=mouthAnim; e=360-mouthAnim; break;
         case LEFT: s=180+mouthAnim; e=180-mouthAnim+360; break;
@@ -215,8 +287,112 @@ void drawGhost(const Ghost& g){
     glBegin(GL_TRIANGLE_FAN); glVertex2f(g.x+5.5+eyeOff, g.y+6); for(int i=0;i<=360;i+=30) glVertex2f(g.x+5.5+eyeOff+2*cos(i*3.1416f/180), g.y+6+2*sin(i*3.1416f/180)); glEnd();
 }
 
+void drawText(float x, float y, void* font, const char* s){
+    glRasterPos2f(x, y);
+    for(int i=0;s[i];i++) glutBitmapCharacter(font, s[i]);
+}
+
+int textWidth(void* font, const char* s){
+    int w = 0;
+    for(int i=0;s[i];i++) w += glutBitmapWidth(font, s[i]);
+    return w;
+}
+
+void drawHUD(){
+    char buf[64];
+    glColor3f(1,1,1);
+    sprintf(buf, "Score: %04d", score);
+    drawText(15, HUD_Y, GLUT_BITMAP_HELVETICA_18, buf);
+
+    int mm = elapsedSec / 60, ss = elapsedSec % 60;
+    sprintf(buf, "Time: %02d:%02d", mm, ss);
+    int tw = textWidth(GLUT_BITMAP_HELVETICA_18, buf);
+    drawText(W/2 - tw/2, HUD_Y, GLUT_BITMAP_HELVETICA_18, buf);
+
+    sprintf(buf, "Lives: %d", lives);
+    int lw = textWidth(GLUT_BITMAP_HELVETICA_18, buf);
+    drawText(W - lw - 15, HUD_Y, GLUT_BITMAP_HELVETICA_18, buf);
+
+    glColor3f(0.5f, 0.5f, 0.5f);
+    drawText(15, HUD_Y - 20, GLUT_BITMAP_HELVETICA_12, "P: Pause   ESC: Menu");
+}
+
+void drawCenteredOverlay(const char* line1, const char* line2){
+    glColor4f(0,0,0,0.6f);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glBegin(GL_QUADS);
+    glVertex2f(W/2 - 200, H/2 - 60);
+    glVertex2f(W/2 + 200, H/2 - 60);
+    glVertex2f(W/2 + 200, H/2 + 60);
+    glVertex2f(W/2 - 200, H/2 + 60);
+    glEnd();
+    glDisable(GL_BLEND);
+
+    glColor3f(1,1,0);
+    int w1 = textWidth(GLUT_BITMAP_TIMES_ROMAN_24, line1);
+    drawText(W/2 - w1/2, H/2 + 10, GLUT_BITMAP_TIMES_ROMAN_24, line1);
+    glColor3f(1,1,1);
+    int w2 = textWidth(GLUT_BITMAP_HELVETICA_18, line2);
+    drawText(W/2 - w2/2, H/2 - 25, GLUT_BITMAP_HELVETICA_18, line2);
+}
+
+void drawMenu(){
+    glColor3f(1,1,0);
+    const char* title = "PAC - MAN";
+    int tw = textWidth(GLUT_BITMAP_TIMES_ROMAN_24, title);
+    drawText(W/2 - tw/2, H - 150, GLUT_BITMAP_TIMES_ROMAN_24, title);
+
+    const char* items[3] = {"Start", "Resume", "Exit"};
+    for(int i=0;i<3;i++){
+        bool disabled = (i==1 && !gameInProgress);
+        if(disabled) glColor3f(0.4f, 0.4f, 0.4f);
+        else if(i == menuSel) glColor3f(1.0f, 0.6f, 0.0f);
+        else glColor3f(1,1,1);
+
+        char buf[64];
+        sprintf(buf, "%s %s", (i==menuSel ? ">" : " "), items[i]);
+        int w = textWidth(GLUT_BITMAP_HELVETICA_18, buf);
+        drawText(W/2 - w/2, H/2 + 40 - i*40, GLUT_BITMAP_HELVETICA_18, buf);
+    }
+
+    glColor3f(0.6f, 0.6f, 0.6f);
+    const char* help = "Up/Down to navigate, Enter to select";
+    int hw = textWidth(GLUT_BITMAP_HELVETICA_12, help);
+    drawText(W/2 - hw/2, 80, GLUT_BITMAP_HELVETICA_12, help);
+}
+
+void updateElapsed(){
+    int now = glutGet(GLUT_ELAPSED_TIME);
+    elapsedSec = (now - startTimeMs - pauseAccumMs) / 1000;
+}
+
+void applyGhostSpeed(){
+    float mul = 1.0f + 0.04f * (elapsedSec / 10);
+    if(mul > 2.0f) mul = 2.0f;
+    for(int i=0;i<4;i++) ghosts[i].speed = BASE_GHOST_SPEED * mul;
+}
+
+void eatDotIfAny(){
+    int col = (int)(pacman.x / CELL);
+    int row = ROWS - 1 - (int)(pacman.y / CELL);
+    if(row<0||row>=ROWS||col<0||col>=COLS) return;
+    if(dots[row][col]){
+        dots[row][col] = false;
+        dotsRemaining--;
+        score += 10;
+        if(dotsRemaining == 0){
+            state = GAME_WON;
+            gameInProgress = false;
+        }
+    }
+}
+
 void update(int value){
     if(state==PLAYING){
+        updateElapsed();
+        applyGhostSpeed();
+
         if(opening) mouthAnim+=2; else mouthAnim-=2;
         if(mouthAnim>40) opening=false;
         if(mouthAnim<10) opening=true;
@@ -232,9 +408,11 @@ void update(int value){
             pacman.y+=dy;
         }
 
+        eatDotIfAny();
+        if(state != PLAYING){ glutPostRedisplay(); glutTimerFunc(16,update,0); return; }
+
         for(int i=0; i<4; i++){
             Ghost& g = ghosts[i];
-
             int newDir = chooseGhostDir(g, pacman.x, pacman.y);
             g.dir = newDir;
 
@@ -266,8 +444,14 @@ void update(int value){
 
             float dist = hypot(g.x - pacman.x, g.y - pacman.y);
             if(dist < 23){
-                state = MENU;
-                cout << "Game Over! Ghost caught Pacman!\n";
+                lives--;
+                if(lives <= 0){
+                    state = GAME_OVER;
+                    gameInProgress = false;
+                } else {
+                    respawnAfterDeath();
+                }
+                break;
             }
         }
     }
@@ -278,34 +462,129 @@ void update(int value){
 
 void display(){
     glClear(GL_COLOR_BUFFER_BIT);
-    if(state==MENU){
-        glColor3f(1,1,1);
-        glRasterPos2f(300,350);
-        const char* m="Press S to Start";
-        for(int i=0;m[i];i++)
-            glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18,m[i]);
-    }else{
+
+    if(state == MENU){
+        drawMenu();
+    } else {
         drawMaze();
+        drawDots();
         drawPacman();
         for(int i=0; i<4; i++) drawGhost(ghosts[i]);
+        drawHUD();
+
+        if(state == PAUSED){
+            drawCenteredOverlay("PAUSED", "Press P to resume, ESC for Menu");
+        } else if(state == GAME_OVER){
+            char buf[64];
+            sprintf(buf, "Final Score: %d  -  Press M for Menu", score);
+            drawCenteredOverlay("GAME OVER", buf);
+        } else if(state == GAME_WON){
+            char buf[64];
+            sprintf(buf, "Score: %d  Time: %02d:%02d  -  Press M for Menu",
+                    score, elapsedSec/60, elapsedSec%60);
+            drawCenteredOverlay("YOU WIN!", buf);
+        }
     }
+
     glutSwapBuffers();
 }
 
-void keyDown(unsigned char k,int,int){
-    k=tolower(k);
-    keys[k]=true;
-    if(k=='s') state=PLAYING;
+void menuConfirm(){
+    if(menuSel == 0){
+        resetGame();
+        state = PLAYING;
+        gameInProgress = true;
+    } else if(menuSel == 1){
+        if(gameInProgress){
+            pauseAccumMs += glutGet(GLUT_ELAPSED_TIME) - pauseStartMs;
+            state = PLAYING;
+        }
+    } else if(menuSel == 2){
+        exit(0);
+    }
 }
-void keyUp(unsigned char k,int,int){ k=tolower(k); keys[k]=false; }
-void specialDown(int k,int,int){specialKeys[k]=true;}
-void specialUp(int k,int,int){specialKeys[k]=false;}
+
+void keyDown(unsigned char k,int,int){
+    if(k == 27){ // ESC
+        if(state == PLAYING){
+            pauseStartMs = glutGet(GLUT_ELAPSED_TIME);
+            state = MENU;
+            menuSel = gameInProgress ? 1 : 0;
+        } else if(state == PAUSED){
+            state = MENU;
+            menuSel = gameInProgress ? 1 : 0;
+        } else if(state == MENU){
+            exit(0);
+        }
+        return;
+    }
+
+    if(k == 13 || k == ' '){ // Enter or Space
+        if(state == MENU){
+            // Skip Resume if disabled
+            if(menuSel == 1 && !gameInProgress) return;
+            menuConfirm();
+            return;
+        }
+    }
+
+    k = tolower(k);
+    keys[k] = true;
+
+    if(state == MENU){
+        if(k == 'w'){
+            menuSel = (menuSel + 2) % 3;
+            if(menuSel == 1 && !gameInProgress) menuSel = (menuSel + 2) % 3;
+        } else if(k == 's'){
+            menuSel = (menuSel + 1) % 3;
+            if(menuSel == 1 && !gameInProgress) menuSel = (menuSel + 1) % 3;
+        }
+        return;
+    }
+
+    if(k == 'p'){
+        if(state == PLAYING){
+            state = PAUSED;
+            pauseStartMs = glutGet(GLUT_ELAPSED_TIME);
+        } else if(state == PAUSED){
+            pauseAccumMs += glutGet(GLUT_ELAPSED_TIME) - pauseStartMs;
+            state = PLAYING;
+        }
+        return;
+    }
+
+    if(k == 'm' && (state == GAME_OVER || state == GAME_WON)){
+        state = MENU;
+        menuSel = 0;
+        return;
+    }
+}
+
+void keyUp(unsigned char k,int,int){
+    k=tolower(k);
+    keys[k]=false;
+}
+
+void specialDown(int k,int,int){
+    specialKeys[k]=true;
+    if(state == MENU){
+        if(k == GLUT_KEY_UP){
+            menuSel = (menuSel + 2) % 3;
+            if(menuSel == 1 && !gameInProgress) menuSel = (menuSel + 2) % 3;
+        } else if(k == GLUT_KEY_DOWN){
+            menuSel = (menuSel + 1) % 3;
+            if(menuSel == 1 && !gameInProgress) menuSel = (menuSel + 1) % 3;
+        }
+    }
+}
+
+void specialUp(int k,int,int){ specialKeys[k]=false; }
 
 int main(int argc,char** argv){
     glutInit(&argc,argv);
     glutInitDisplayMode(GLUT_DOUBLE|GLUT_RGB);
     glutInitWindowSize(W,H);
-    glutCreateWindow("Pacman - Ghosts Roam Everywhere");
+    glutCreateWindow("Pacman");
     gluOrtho2D(0,W,0,H);
 
     glutDisplayFunc(display);
@@ -317,13 +596,9 @@ int main(int argc,char** argv){
 
     srand(time(0));
 
-    pacman = Entity(1.5f*CELL, (ROWS-1.5f)*CELL, RIGHT, 3.0f);
-
-    // Ghosts start SCATTERED in different areas of the maze
-    ghosts[0] = Ghost(3.5f*CELL,  15.5f*CELL, 1.0f, 0.0f, 0.0f);   // Red - Top leftish
-    ghosts[1] = Ghost(15.5f*CELL, 15.5f*CELL, 1.0f, 0.6f, 0.6f);   // Pink - Top right
-    ghosts[2] = Ghost(5.5f*CELL,   5.5f*CELL, 0.0f, 1.0f, 1.0f);   // Cyan - Bottom left
-    ghosts[3] = Ghost(13.5f*CELL,  8.5f*CELL, 1.0f, 0.6f, 0.0f);   // Orange - Middle right
+    placePacmanSpawn();
+    placeGhostSpawns();
+    resetDots();
 
     glutMainLoop();
     return 0;
