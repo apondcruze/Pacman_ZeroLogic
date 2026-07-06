@@ -50,6 +50,3 @@ A simple Pac-Man game developed in **C++ using OpenGL (FreeGLUT)** for a **Compu
 * Avoid ghosts to survive
 * Each ghost collision reduces one life
 * Ghost speed increases over time
-
-
-## BY Apon D'Cruze & Tithi Rani
